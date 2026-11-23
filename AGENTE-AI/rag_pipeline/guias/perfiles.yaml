@@ -1,0 +1,297 @@
+# Perfil de extracción de cada libro (rag/guias.py, scripts/extraer_guias.py).
+#
+# Cada bloque de texto del PDF recibe un rol según su fuente dominante (la que
+# más caracteres tiene). Las reglas de `roles` se prueban en orden y gana la
+# primera que calza; un bloque sin regla es "material" (texto de figuras,
+# tablas y flujogramas) y solo se conserva si queda debajo o encima de un pie
+# ("Table 7-4: …", "Tabla 1. …"), según `pie_posicion`.
+#
+# El material que queda sin pie se agrupa en recuadros por cercanía y se
+# conserva si se lee como lista o tabla ("Indicaciones de dren pleural"); los
+# flujogramas, hechos de rótulos cortos ("¿Penetra?", "SI", "NO"), se
+# descartan (rag/guias.py, recuadros).
+#
+# Los flujogramas y las tablas que el PDF trae como imagen o sin las flechas
+# se reemplazan por una transcripción a mano (GUIAS_TRANSCRIPCIONES, fuera
+# de git; ver rag/guias.py, cargar_transcripciones).
+#
+# Roles: titulo1..titulo4 (jerarquía de secciones), cuerpo, descartar.
+# Medido sobre los PDF el 07/10/2026 con scratchpad/bloques.py.
+
+atls:
+  archivo: ATLS_11thEdition_CourseManual_ENG_17.pdf
+  fuente: ATLS
+  libro: "Advanced Trauma Life Support (ATLS), 11.ª ed. — Course Manual. American College of Surgeons"
+  idioma: en
+  # Página impresa = página del PDF - 19 (p. ej. PDF 119 → p. 100).
+  desfase_pagina: 19
+  # Encabezado "COURSE MANUAL | Chapter N | …" (y < 30) y pie con número de página (y > 752).
+  margen_sup: 30
+  margen_inf: 752
+  # "intra-/abdominal" → "intra-abdominal": en inglés el guion de fin de línea
+  # es parte de la palabra (el corte de sílaba usa guion blando, U+00AD).
+  guion_corta_palabra: false
+  pie: '^(Figure|Table|Box)\s+\d+-\d+'
+  pie_posicion: arriba
+  referencias: '^REFERENCES$'
+  roles:
+    - {rol: titulo1, fuente: 'OpenSans-Bold$', tam: [11.5, 12.5], color: 'ffffff', mayusculas: true}
+    - {rol: titulo2, fuente: 'OpenSans-Bold$', tam: [11.5, 12.5], mayusculas: true}
+    - {rol: titulo3, fuente: 'OpenSans-Bold$', tam: [9.5, 10.5], mayusculas: true}
+    - {rol: titulo4, fuente: 'OpenSans-BoldItalic', tam: [9.5, 10.5]}
+    - {rol: cuerpo, fuente: 'Minion3'}
+    # Viñetas de "KEY LEARNING POINTS" al final de cada capítulo: en Arial
+    # (p. 81) o en OpenSans (p. 36).
+    - {rol: cuerpo, fuente: 'Arial-BoldMT|OpenSans-Bold$', tam: [8.5, 9.5], empieza: '^•'}
+  # Índice y portada de las secciones II y III.
+  saltar: [259, 260, 261, 305, 306, 307]
+  # La primera página de cada capítulo es la portada con los objetivos.
+  saltar_portada: true
+  # [número, título, primera página del PDF]. El capítulo termina donde
+  # empieza el siguiente; el último, en `fin`. El índice alfabético (p. 356+)
+  # queda fuera. Hasta el 19/10 `fin` era 350 y dejaba fuera el final del
+  # capítulo 24 (ATLS-OE, el consenso de Hartford y el resumen), tomado por
+  # error por un apéndice.
+  fin: 355
+  # Capítulos sin contenido diagnóstico: se extraen igual; la búsqueda decide
+  # si se filtran.
+  no_clinicos: [2, 16, 18, 19, 20]
+  capitulos:
+    - [1, "Initial Assessment: Primary Survey", 22]
+    - [2, "Resuscitation Team Function and Communication", 38]
+    - [3, "x: Control of eXsanguinating External Hemorrhage", 56]
+    - [4, "Airway Assessment and Management", 60]
+    - [5, "Breathing and Ventilation Assessment and Management", 84]
+    - [6, "Circulation Assessment and Volume Resuscitation", 98]
+    - [7, "Disability: Neurological Assessment and Management", 118]
+    - [8, "Exposure and Environmental Threats in the Primary Survey", 148]
+    - [9, "Thermal Injuries", 154]
+    - [10, "Musculoskeletal Trauma", 166]
+    - [11, "Trauma in the Pediatric Patient", 190]
+    - [12, "Trauma in the Older Adult", 210]
+    - [13, "Trauma in the Pregnant Patient", 224]
+    - [14, "Initial Assessment: Secondary Survey", 240]
+    - [15, "Transfer to Definitive Care", 252]
+    - [16, "Trauma Systems", 262]
+    - [17, "Triage and Disaster Management", 268]
+    - [18, "Injury Prevention", 276]
+    - [19, "Trauma-Informed Care and Social Determinants of Health", 288]
+    - [20, "Communicating Serious News in the Acute Trauma Setting", 298]
+    - [21, "Thoracic, Abdominopelvic, and Genitourinary Trauma", 308]
+    - [22, "Penetrating Trauma", 324]
+    - [23, "Ocular Trauma", 336]
+    - [24, "Injury in Combat Zones and Austere Environments", 346]
+
+huv:
+  archivo: LIBRO PACIENTE TRAUMATIZADO MANUAL DE MANEJO INICIAL.pdf
+  fuente: HUV
+  libro: "Paciente Traumatizado — Manual de Manejo Inicial. Hospital Universitario del Valle / Universidad del Valle"
+  idioma: es
+  desfase_pagina: 0
+  margen_sup: 30
+  margen_inf: 752
+  # En español el guion de fin de línea corta la palabra ("desorgani-/zados").
+  guion_corta_palabra: true
+  pie: '^(Tabla|Figura|Gr[aá]fic[oa]|Cuadro|Algoritmo)\s*\d*[.:]'
+  # "Tabla 1." va debajo de la tabla (p. 12).
+  pie_posicion: abajo
+  # Pies de foto y de dibujo ("Foto.", "Dibujos.", "imagen."): se descartan
+  # con el material que tengan encima (rótulos de la imagen). Sin la imagen
+  # no dicen nada revisable y entraban como "Recuadro: Foto. Herida por arma
+  # de fuego…" (19/10: 99 recuadros).
+  figura: '(?i)^(fotos?|dibujos?)\b|^imagen\.'
+  referencias: '^(BIBLIOGRAF[IÍ]A|REFERENCIAS|LECTURAS RECOMENDADAS)\.?$'
+  roles:
+    - {rol: titulo1, fuente: 'Montserrat-Bold', tam: [15.5, 16.5], color: '00bae3'}
+    - {rol: titulo3, fuente: 'FuturaBT-BookItalic', tam: [12.5, 13.5]}
+    # Referencias sueltas fuera de la sección de bibliografía (p. 21).
+    - {rol: descartar, fuente: 'FuturaBT-BookItalic', tam: [11.5, 12.4]}
+    - {rol: titulo2, fuente: 'Tahoma-Bold', tam: [11.5, 12.5], no_color: '000000'}
+    - {rol: cuerpo, fuente: 'Tahoma'}
+  saltar: []
+  # El capítulo 23 termina en la p. 299; la 300 es la contraportada.
+  fin: 299
+  # Capítulo 1: programa de prevención de violencia juvenil (TCV).
+  no_clinicos: [1]
+  # Del índice (pp. 6-7). Las portadas de capítulo son imágenes.
+  capitulos:
+    - [1, "¿Es posible prevenir la violencia juvenil desde los hospitales? Experiencia del programa TCV del HUV", 10]
+    - [2, "Paciente traumatizado. ABCDE y triage durante la atención", 22]
+    - [3, "Cómo prevenir la hipotermia durante el proceso de atención", 35]
+    - [4, "Paciente politraumatizado. Atención inicial", 44]
+    - [5, "Vía aérea en trauma. Manejo inicial de lo simple a lo complejo", 67]
+    - [6, "Shock hemorrágico traumático. Primero parar el sangrado", 89]
+    - [7, "Trauma en el adulto mayor. Un manejo diferencial", 100]
+    - [8, "Manejo inicial del paciente quemado. Reanimación y cuidados básicos de la piel", 111]
+    - [9, "Trauma penetrante de cuello. El valor de la evaluación clínica", 126]
+    - [10, "Trauma del opérculo torácico. ¿Cuándo sospecharlo y cómo diagnosticarlo?", 138]
+    - [11, "Trauma torácico penetrante", 148]
+    - [12, "Trauma cerrado de tórax", 162]
+    - [13, "Trauma precordial penetrante. Evaluación con base en la clínica y el ultrasonido", 175]
+    - [14, "Trauma toracoabdominal penetrante", 185]
+    - [15, "Trauma abdominal penetrante", 193]
+    - [16, "Trauma cerrado de abdomen", 205]
+    - [17, "Trauma pélvico severo", 217]
+    - [18, "Trauma urológico", 232]
+    - [19, "Trauma genital masculino", 242]
+    - [20, "Trauma vascular periférico. Primero controlar el sangrado", 256]
+    - [21, "Ultrasonido en trauma. Una extensión del examen físico", 272]
+    - [22, "Toracostomía cerrada. Técnica quirúrgica", 283]
+    - [23, "Exploración de la herida traumática. ¿Cuándo y cómo?", 292]
+
+# ATLS 10.ª ed. en español (23/10/2026). Traducción
+# automática del PDF en inglés, no la oficial: una sola familia tipográfica
+# (ArialUnicodeMS) con tamaños continuos, así que los roles van por COLOR.
+# Medido sobre el PDF el 23/10 (scratchpad/bloques10.py).
+atls10:
+  archivo: ATLS_10_ed_espanol.pdf
+  fuente: ATLS10
+  libro: "Advanced Trauma Life Support (ATLS), 10.ª ed. (2018) — Manual para el alumno. American College of Surgeons. Traducción al español no oficial"
+  idioma: es
+  # El desfase cambia de 53 a 58 por las páginas repetidas (76, 127, 220,
+  # 420) y una en blanco de más antes del apéndice E. Medido con los números
+  # de los encabezados: coinciden en las 323 páginas en que se leen.
+  desfases: [[1, 53], [76, 54], [127, 55], [220, 56], [360, 57], [420, 58]]
+  # Encabezado (y ≈ 39-48) y "VOLVER AL ÍNDICE" con el número de página (y ≈ 756).
+  margen_sup: 52
+  margen_inf: 750
+  guion_corta_palabra: true
+  # El 17,9 % de los caracteres viene superpuesto 2 o 3 veces en la misma caja.
+  deduplicar_lineas: true
+  # Cada renglón es un bloque: las tablas se arman por columnas (si no, los
+  # renglones de las celdas se intercalan) y un título de dos renglones viene
+  # en dos bloques ("15% a 30% … Hemorragia" / "Clase II", p. 104 del PDF).
+  tablas_por_columnas: true
+  unir_titulos: true
+  # Pies de dos renglones en dos bloques ("Tabla 8-1 deformidades…" /
+  # "comunes", p. 210 del PDF): rag/guias.py, unir_pies_partidos.
+  unir_pies: true
+  # Frases repetidas por la traducción en otra posición de la página (p. 179
+  # del PDF: la misma oración ×3); rag/guias.py, sin_repeticiones.
+  quitar_repetidas: true
+  pie_posicion: arriba
+  # Abre una leyenda de figura; lo que sigue en gris es su continuación.
+  leyenda: '(?i)^figura\s+[\dA-G]{1,2}\s*-\s*\d+'
+  referencias: '(?i)^bibliograf[ií]a\s*$'
+  # Arreglos del PDF, no del libro (rag/guias.py, corregir), línea por línea y
+  # en orden. Los errores de traducción del contenido no se tocan.
+  reemplazos:
+    # La letra capitular, traducida aparte del resto de la palabra ("H" de
+    # "Head" → "MARIDO"; "M" de "Many" → "METRO"): solo la primera palabra o
+    # frase de cada capítulo, en la línea de la capitular.
+    - ['^W gallina que tratan a pacientes heridos, médicos', 'Cuando tratan a pacientes heridos, los médicos']
+    - ['^T que un suministro inadecuado', 'Un suministro inadecuado']
+    - ['^T l primer paso', 'El primer paso']
+    - ['^T traumatismo torácica,', 'El traumatismo torácico']
+    - ['^T que la evaluación de la circulación', 'La evaluación de la circulación']
+    - ['^MARIDO lesiones EAD se encuentran', 'Las lesiones de la cabeza se encuentran']
+    - ['^S lesiones de pino,', 'Las lesiones de la columna,']
+    - ['^METRO ninguno de los pacientes', 'Muchos de los pacientes']
+    - ['^T Hermal lesiones son', 'Las lesiones térmicas son']
+    - ['^yo njury sigue siendo', 'La lesión sigue siendo']
+    - ['^norte principios de todos los países', 'Casi todos los países']
+    - ['^PAG regnancy causa', 'El embarazo causa']
+    - ['^T Por supuesto que Advanced Trauma La vida es Support®', 'El curso Advanced Trauma Life Support® está']
+    - ['^yo n medicina militar', 'En medicina militar']
+    - ['^T que el cuerpo se esfuerza', 'El cuerpo se esfuerza']
+    - ['^T que la capacidad para proporcionar', 'La capacidad para proporcionar']
+    - ['^do desastres ontemporary', 'Los desastres contemporáneos']
+    - ['^re Espite avances', 'A pesar de los avances']
+    - ['^T el suyo es un ejercicio', 'Este es un ejercicio']
+    - ['^do triaje orrect es', 'El triaje correcto es']
+    - ['^yo njury no debe considerarse', 'La lesión no debe considerarse']
+    - ['^yo njuries se producen', 'Las lesiones se producen']
+    # La viñeta "▸" traducida como "norte", delante de las referencias
+    # ("( norte FIGURA 1-1 )", "norte TABLA 3-1") o al final del bloque, antes
+    # del enlace. Medido el 23/10: "norte" no aparece en otro sentido.
+    - ['\bnorte\s+|\s*\bnorte\s*$', '']
+    - ["​", '']
+    # Las letras de las partes de una figura, traducidas como palabras ("A.
+    # el pecho; SEGUNDO. el abdomen; DO. la pelvis…", p. 100 del PDF)
+    - ['\bSEGUNDO\.', 'B.']
+    - ['\bDO\.', 'C.']
+    - ['\bRE\.', 'D.']
+  roles:
+    # Rótulos de las partes de una figura sueltos en el cuerpo: "A B C"
+    # traducido como "UN segundo do" (p. 88 del PDF)
+    - {rol: descartar, fuente: 'ArialUnicodeMS', empieza: '(?i)^((un|segundo|do|re|[a-f])\b\s*)+$'}
+    # Cabeceras de las tablas "trampa | prevención" (pitfall), de los
+    # recuadros "trabajo en equipo" y "OBJETIVOS": en blanco como los títulos,
+    # pero son de su tabla o recuadro.
+    - {rol: material, fuente: 'ArialUnicodeMS', color: 'ffffff', empieza: '(?i)^(trampa|ca[ií]da)\b|^prevenci[oó]n\s*$|^trabajo en equipo\b|^objetivos( de aprendizaje)?\s*$'}
+    # Pie de tabla o recuadro, en blanco sobre la franja ("Tabla 3-1 signos y
+    # síntomas…", "caja 12-1"): por el color, porque "TABLA 3-1 esboza…"
+    # también abre párrafos del cuerpo. La traducción cambia la palabra y el
+    # orden ("mesa tasas de fluidos de resucitación 9-1", "caja de correos 4",
+    # "Panorámica general de 6-3"): basta con la palabra y un número.
+    - {rol: pie, fuente: 'ArialUnicodeMS', color: 'ffffff', empieza: '(?i)^(?=.*\b(tabla|cuadro|caja|mesa|buz[oó]n|panor[aá]mica)\b)(?=.*\d)'}
+    # Leyendas de figura: la primera línea en rojo, el resto en gris.
+    - {rol: leyenda, fuente: 'ArialUnicodeMS', color: '616060'}
+    - {rol: leyenda, fuente: 'ArialUnicodeMS', color: 'ad1d23', empieza: '(?i)^figura\s+[\dA-G]{1,2}\s*-\s*\d+'}
+    # Títulos: blanco sobre franja azul, rojo, y ocre o verde en negrita (p. 51,
+    # 48). La traducción achica algunas franjas a 8,4 ("Trauma de la cabeza",
+    # p. 258 del PDF); los pies de ese tamaño ya se reconocieron arriba y sus
+    # segundos renglones se suman al pie (`unir_pies`).
+    - {rol: titulo1, fuente: 'ArialUnicodeMS', tam: [8.0, 12.5], color: 'ffffff'}
+    - {rol: titulo2, fuente: 'ArialUnicodeMS', tam: [7.5, 12.5], color: 'ac1a25'}
+    - {rol: titulo2, fuente: 'ArialUnicodeMS', tam: [9.0, 12.5], color: 'ad1d23'}
+    - {rol: titulo2, fuente: 'ArialUnicodeMS', tam: [12.0, 17.0], color: 'c98505'}
+    - {rol: titulo3, fuente: 'ArialUnicodeMS-Bold', tam: [6.5, 10.5], color: 'c98505'}
+    - {rol: titulo3, fuente: 'ArialUnicodeMS-Bold', tam: [6.5, 10.5], color: '138e76'}
+    # Cuerpo, el resaltado en rojo y las referencias cruzadas en azul
+    - {rol: cuerpo, fuente: 'ArialUnicodeMS', color: '383837'}
+    - {rol: cuerpo, fuente: 'ArialUnicodeMS', tam: [5.5, 9.0], color: 'ad1d23'}
+    - {rol: cuerpo, fuente: 'ArialUnicodeMS', color: '275f7f'}
+    # Rótulos dentro de las figuras y sus créditos ("Libélula Media Group
+    # 11/23/2011", "Figura # 06,01")
+    - {rol: descartar, fuente: 'ArialUnicodeMS', color: '171615'}
+  # Portadas (título y "Esquema del capítulo / OBJETIVOS"), páginas repetidas
+  # (76, 127, 220, 420), la portada de los apéndices (309-312) y el índice de
+  # las estaciones de habilidades (392-393).
+  saltar: [55, 56, 75, 76, 77, 96, 97, 116, 117, 137, 138, 157, 158, 183, 184, 203, 204,
+           224, 225, 242, 243, 270, 271, 282, 283, 296, 297, 309, 310, 311, 312,
+           127, 220, 420, 392, 393]
+  # En la primera página de cada apéndice, los objetivos van arriba del texto:
+  # se descarta lo que termina antes de esta altura.
+  recortar_arriba: {313: 400, 321: 320, 331: 430, 345: 395, 360: 395, 374: 300}
+  saltar_portada: false
+  fin: 464
+  # Resultados (21) y Prevención (22) van después del índice alfabético.
+  no_clinicos: [17, 18, 19, 21, 22]
+  # Capítulos del ATLS 11 que tratan lo mismo:
+  # para la tarjeta de la app ("en la 11.ª ed.: cap. 7") y para revisar las
+  # anotaciones. Propuesta de Claude por títulos y contenido, 23/10/2026; la
+  # valida el médico. El G (habilidades) no tiene equivalente. La 11.ª
+  # separa capítulos que la 10.ª no tiene: el 3 (hemorragia exanguinante, con
+  # el torniquete) y el 22 (trauma penetrante); la parada traumática pasó al 6.
+  equivalente_11: {1: [1, 14, 3], 2: [4, 5], 3: [3, 6], 4: [5, 21, 6, 22], 5: [21, 6, 22], 6: [7],
+                   7: [7], 8: [10, 3], 9: [9, 8], 10: [11], 11: [12], 12: [13], 13: [15], 14: [23],
+                   15: [8, 9], 16: [24, 17], 17: [17], 18: [2], 19: [17], 20: [],
+                   21: [16], 22: [18], 23: [14, 22]}
+  # [número, título, primera página del PDF, (última)]. Títulos de "Contenidos
+  # breves" (p. 46 del PDF), con la gramática corregida. Los apéndices A-G van
+  # del 14 al 20; el G termina antes del índice alfabético (pp. 435-449).
+  capitulos:
+    - [1, "Evaluación y tratamiento inicial", 55]
+    - [2, "Vía aérea y manejo ventilatorio", 75]
+    - [3, "Choque", 96]
+    - [4, "Trauma torácico", 116]
+    - [5, "Trauma abdominal y pélvico", 137]
+    - [6, "Trauma de la cabeza", 157]
+    - [7, "Trauma de columna vertebral y médula espinal", 183]
+    - [8, "Trauma musculoesquelético", 203]
+    - [9, "Lesiones térmicas", 224]
+    - [10, "Trauma pediátrico", 242]
+    - [11, "Trauma geriátrico", 270]
+    - [12, "Trauma en el embarazo y violencia de pareja", 282]
+    - [13, "Transferencia al cuidado definitivo", 296]
+    - [14, "Apéndice A: Trauma ocular", 313]
+    - [15, "Apéndice B: Hipotermia y lesiones por calor", 321]
+    - [16, "Apéndice C: Trauma en víctimas en masa, entornos austeros y operativos", 331]
+    - [17, "Apéndice D: Preparación y respuesta ante desastres", 345]
+    - [18, "Apéndice E: ATLS y manejo de recursos del equipo de trauma", 360]
+    - [19, "Apéndice F: Escenarios de triage", 374]
+    - [20, "Apéndice G: Habilidades", 392, 434]
+    - [21, "Resultados en trauma", 450]
+    - [22, "Prevención de lesiones", 453]
+    - [23, "Biomecánica de la lesión", 458]

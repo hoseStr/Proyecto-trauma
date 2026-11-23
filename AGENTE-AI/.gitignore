@@ -1,0 +1,30 @@
+# Este repositorio solo tiene código. Los datos viven en la carpeta
+# datos_procesados del Drive institucional y nunca se versionan.
+
+# --- Datos de pacientes y fuentes (PHI y derechos de autor) ---
+trauma.csv
+*.csv
+*.parquet
+anonimizacion/data/
+anonimizacion/outputs/
+anonimizacion/reports/
+anonimizacion/reporte_anonimizacion.html
+# Nombres de médicos del HUV: viaja por Drive (04_restringido), no por git
+anonimizacion/config/gazetteers.yaml
+
+# --- Índices de búsqueda (contienen el texto de los casos) ---
+rag_pipeline/indices/
+
+# --- Texto extraído de los manuales: solo se versiona el perfil ---
+rag_pipeline/guias/*
+!rag_pipeline/guias/perfiles.yaml
+
+# --- Resultados de pruebas y revisión ---
+rag_pipeline/reports/
+rag_pipeline/eval/revision/
+
+# --- Entorno y cachés ---
+.venv/
+__pycache__/
+.pytest_cache/
+desktop.ini

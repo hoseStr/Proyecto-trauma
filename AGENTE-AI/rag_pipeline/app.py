@@ -1,0 +1,830 @@
+"""
+Chatbot de consulta sobre el registro de trauma.
+
+    streamlit run app.py
+
+Requiere los índices construidos (`python -m rag.index`; los manuales, con
+`--fuente guias`) y Ollama corriendo.
+"""
+from __future__ import annotations
+
+import html
+import re
+import time
+import warnings
+
+import streamlit as st
+
+warnings.filterwarnings("ignore")
+
+from rag import config                                    # noqa: E402
+from rag.consulta import para_libros                           # noqa: E402
+from rag.build_prompt import (                                 # noqa: E402
+    AVISO_ATLS10, RX_LINEA_RESPALDO, agrupar_guias, cabecera_guia, desenlace_visible, ids_en_pantalla,
+    texto_guia,
+)
+from rag.ficha import RX_CASO, unir                            # noqa: E402
+from rag.preguntas import NO_SE_SABE, descartar                # noqa: E402
+from rag.tarjetas import ROTULO_PRIORIDAD                      # noqa: E402
+from rag.generate import ollama_disponible, responder, resumir_caso, usar_guias   # noqa: E402
+from rag.guias import cargar_perfiles, equivalentes_atls11      # noqa: E402
+from rag.hallazgos import resaltar_html                        # noqa: E402
+from rag.retrieve import RUTAS, Filtros, hay_guias, ruta_por_defecto  # noqa: E402
+
+TITULO = "Asistente Clínico de Trauma"
+st.set_page_config(page_title=TITULO, page_icon="🩺", layout="centered", initial_sidebar_state="collapsed")
+
+CON_FICHA = config.CONVERSACION == "ficha"      # la ficha del paciente (rag/ficha.py)
+
+# Diseño minimalista (24/10, pedido del usuario): al abrir, el título (desde el
+# 26/10, siempre el mismo; antes un saludo según la hora) y el cuadro de la
+# consulta en el centro; en la conversación, sin avatares, la consulta en una
+# burbuja a la derecha y la respuesta como texto. La paleta es la de
+# siempre (.streamlit/config.toml): blanco, rojo #C8102E y rosa #FCEEEF; azul
+# para los manuales y la ficha, ocre para las notas de verificación.
+CSS = """
+<style>
+  :root { --rojo:#C8102E; --rosa:#FCEEEF; --azul:#1F6FB2; --ocre:#B26B00;
+          --borde:rgba(31,31,31,.12); --tenue:rgba(31,31,31,.55); }
+  [data-testid="stHeader"] { background:transparent; }
+  [data-testid="stAppDeployButton"], [data-testid="stDecoration"] { display:none; }
+  [data-testid="stMainBlockContainer"] { max-width:780px; padding-top:2.5rem; padding-bottom:6rem; }
+
+  /* la portada: título y consulta en el centro */
+  .titulo { text-align:center; margin:18vh 0 1.6rem; font-family:Georgia,"Times New Roman",serif;
+            font-size:2.6rem; font-weight:400; letter-spacing:-.01em; color:#1F1F1F; }
+  .titulo .marca { color:var(--rojo); margin-right:.3em; }
+  .al-pie { text-align:center; color:var(--tenue); font-size:.85rem; margin-top:.9rem; }
+
+  /* el cuadro de la consulta */
+  [data-testid="stChatInput"], [data-testid="stChatInput"] > div { border-radius:18px; }
+  [data-testid="stChatInput"] { box-shadow:0 1px 8px rgba(0,0,0,.06); }
+  [data-testid="stChatInput"] textarea { font-size:1.05rem; }
+  [data-testid="stBottom"] > div { background:#FFFFFF; }
+
+  /* la conversación: sin avatares; la consulta, en una burbuja a la derecha */
+  [data-testid="stChatMessageAvatarUser"], [data-testid="stChatMessageAvatarAssistant"] { display:none; }
+  [data-testid="stChatMessage"] { background:transparent; padding:.2rem 0; gap:0;
+                                  font-size:1.05rem; line-height:1.6; }
+  [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
+      background:var(--rosa); border-radius:18px; padding:.55rem 1.1rem; margin:1.4rem 0 .6rem auto;
+      width:fit-content; max-width:85%; }
+  [data-testid="stChatMessageContent"] h3 { font-size:1.15rem; font-weight:600; margin:1.1rem 0 .3rem; }
+  [data-testid="stExpander"] details { border:1px solid var(--borde); border-radius:12px; }
+
+  .caso-box { border:1px solid var(--borde); border-radius:12px;
+              padding:10px 14px; margin-bottom:10px; font-size:0.95rem; line-height:1.55; }
+  .caso-id  { font-weight:600; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .etq { display:inline-block; padding:1px 8px; border-radius:10px; font-size:0.82rem;
+         background:rgba(31,31,31,.05); margin:2px 3px 2px 0; }
+  .caso-box mark { background:rgba(255,200,0,.35); color:inherit; padding:0 2px; border-radius:3px; }
+  .guia-box { border-left:3px solid var(--azul); }
+  .nota { font-size:0.93rem; padding:8px 12px; margin-bottom:10px; border-radius:10px;
+          border-left:3px solid var(--ocre); background:rgba(178,107,0,.06); line-height:1.45; }
+  .nota.ficha { border-left-color:var(--azul); background:rgba(31,111,178,.06); }
+  .tiempo { font-size:0.75rem; color:var(--tenue); opacity:.7; text-align:right; margin-top:2px;
+            font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .aviso { font-size:0.9rem; opacity:.75; line-height:1.45; }
+  .marca-lateral { font-family:Georgia,"Times New Roman",serif; font-size:1.25rem; margin-bottom:.4rem; }
+  .marca-lateral span { color:var(--rojo); margin-right:.3em; }
+  /* las preguntas con botones, bajo la última respuesta (app.eleccion, 26/10):
+     en una tarjeta; el tema de cada pregunta, una línea pequeña en rojo encima;
+     los botones, blancos, y al pasar, rojo sobre rosa */
+  .st-key-eleccion { border:1px solid var(--borde); border-radius:16px; background:#FFFFFF;
+                     padding:1rem 1.25rem 1.1rem; margin-top:.6rem; gap:.95rem; }
+  .eleccion-titulo { font-size:.8rem; color:var(--tenue); letter-spacing:.03em; margin-bottom:.45rem; }
+  .st-key-eleccion [data-testid="stWidgetLabel"] p { font-size:1rem; line-height:1.4; color:#1F1F1F; }
+  .st-key-eleccion [data-testid="stWidgetLabel"] strong {
+      display:block; margin-bottom:.15rem; font-size:.72rem; font-weight:600; letter-spacing:.08em;
+      text-transform:uppercase; color:var(--rojo); }
+  .st-key-eleccion button[data-variant="pills"] {
+      border:1px solid rgba(31,31,31,.18); border-radius:999px; background:#FFFFFF; color:#1F1F1F;
+      padding:.3rem 1rem; min-height:2.2rem; transition:background-color .15s, border-color .15s, color .15s; }
+  .st-key-eleccion button[data-variant="pills"] p { font-size:.95rem; }
+  .st-key-eleccion button[data-variant="pills"]:hover {
+      border-color:var(--rojo); color:var(--rojo); background:var(--rosa); }
+  .st-key-eleccion button[data-variant="pills"][aria-checked="true"] {
+      border-color:var(--rojo); background:var(--rojo); color:#FFFFFF; }
+  /* "No se sabe" (en cursiva desde app.eleccion): la salida, más discreta */
+  .st-key-eleccion button[data-variant="pills"]:has(em) { border-style:dashed; color:var(--tenue); }
+  .st-key-eleccion button[data-variant="pills"] em { font-style:normal; }
+  /* corregir al código: aparte, como acción secundaria */
+  .st-key-eleccion [class*="st-key-corregir-"] { width:100%; border-top:1px solid var(--borde); padding-top:.7rem; }
+  .st-key-eleccion [class*="st-key-corregir-"] [data-testid="stTooltipHoverTarget"] {
+      justify-content:flex-start !important; }
+  .st-key-eleccion [class*="st-key-corregir-"] button { width:fit-content; color:var(--tenue); }
+  .st-key-eleccion [class*="st-key-corregir-"] button:hover { color:var(--rojo); }
+
+  /* el script que acompaña la respuesta (SEGUIR_RESPUESTA) no ocupa lugar */
+  [data-testid="stElementContainer"]:has(.seguir-respuesta) { display:none; }
+</style>
+"""
+# Una consulta nueva, escrita o con un botón: la página baja con la respuesta
+# mientras se genera, como lo hacía Streamlit, y se queda quieta cuando la
+# respuesta termina (su línea de tiempo y modelo), antes de que aparezcan los
+# botones de las preguntas (26/10, pedido del usuario: que hasta ellos baje el
+# médico con la rueda). Medido en Edge, por eso:
+#   · baja hasta el final del último mensaje, justo encima del cuadro de la
+#     consulta, y no hasta el fondo de la página: al terminar el turno Streamlit
+#     quita lo que sobró de la pasada anterior, la página se acorta y, desde el
+#     fondo, el navegador dejaba a la vista los botones;
+#   · reconoce los botones por la clave de su contenedor (st-key-pregunta-…),
+#     que existe antes de que cargue el componente (stButtonGroup llega después),
+#     y solo los de esta respuesta: los de la anterior siguen un momento en la
+#     página;
+#   · baja suave (26/10, pedido del usuario): en cada cuadro de animación avanza
+#     una parte de lo que falta (SUAVIDAD), con un tope (TOPE) para un ritmo
+#     parejo, en vez de saltar cada 120 ms hasta el final del texto. Cuando la
+#     respuesta termina (su línea de tiempo, o ya están sus botones, que llegan
+#     casi junto con el final) baja lo que le falte hasta el final del mensaje y
+#     ahí se detiene. Con "reducir movimiento" en el sistema, salta.
+# También se detiene si el médico sube con la rueda o el teclado, o a los 3
+# minutos. Va en el documento principal (st.html con JavaScript); el contenedor
+# que se desplaza es #stMain. `{turno}` cambia el cuerpo en cada consulta, para
+# que el script vuelva a correr.
+SEGUIR_RESPUESTA = """
+<div class="seguir-respuesta" data-turno="{turno}"></div>
+<script>
+(() => {
+  const main = document.getElementById("stMain");
+  if (!main) return;
+  if (window.pararSeguirRespuesta) window.pararSeguirRespuesta();
+  const SUAVIDAD = 0.1;            // parte de lo que falta que avanza en cada cuadro (~60 por segundo)
+  const TOPE = 28;                 // px por cuadro como máximo (~1.700 px/s): un ritmo parejo
+  const suave = !matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const inicio = performance.now();
+  let activo = true, terminada = false, revisado = -1e9, u = null, cuadroAnim = 0;
+  const ultimo = () => {
+    const mensajes = main.querySelectorAll('[data-testid="stChatMessage"]');
+    return mensajes[mensajes.length - 1];
+  };
+  // los botones de la respuesta nueva, por su clave (app.eleccion usa el
+  // índice de la respuesta, que es {turno}); los de la
+  // anterior siguen un momento en la página mientras Streamlit la vuelve a pintar
+  const deEstaRespuesta = (c) => c.startsWith("st-key-pregunta-{turno}-") || c === "st-key-corregir-{turno}";
+  const hayBotones = () => [...main.querySelectorAll('[class*="st-key-"]')]
+    .some((el) => [...el.classList].some(deEstaRespuesta));
+  // cuánto falta para que el final del mensaje quede encima del cuadro de la consulta
+  const falta = (u) => {
+    const cuadro = document.querySelector('[data-testid="stBottom"]');
+    const limite = main.getBoundingClientRect().bottom - (cuadro ? cuadro.getBoundingClientRect().height : 0) - 16;
+    return u.getBoundingClientRect().bottom - limite;
+  };
+  const alRueda = (e) => { if (e.deltaY < 0) parar(); };
+  const alTecla = (e) => { if (["PageUp", "ArrowUp", "Home"].includes(e.key)) parar(); };
+  const paso = (ahora) => {
+    if (!activo) return;
+    if (ahora - revisado > 120) {                           // cada 120 ms: ¿terminó?
+      revisado = ahora;
+      u = ultimo();
+      if (ahora - inicio > 180000) return parar();
+      // terminó: su línea de tiempo, o ya están sus botones (llegan casi junto
+      // con el final y la página va detrás: se termina de bajar igual)
+      terminada = !!(u && u.querySelector(".tiempo")) || hayBotones();
+    }
+    if (u) {
+      const f = falta(u);                                   // solo hacia abajo, hasta el mensaje
+      if (f > 0.5) main.scrollTop += suave ? Math.min(f, TOPE, Math.max(1, f * SUAVIDAD)) : f;
+      else if (terminada) return parar();                   // terminó y llegó: hasta aquí
+    }
+    cuadroAnim = requestAnimationFrame(paso);
+  };
+  cuadroAnim = requestAnimationFrame(paso);
+  function parar() {
+    activo = false;
+    cancelAnimationFrame(cuadroAnim);
+    if (window.soltarAlto) window.soltarAlto();            // ver GUARDAR_ALTO
+    main.removeEventListener("wheel", alRueda);
+    main.removeEventListener("touchmove", parar);
+    window.removeEventListener("keydown", alTecla);
+    window.pararSeguirRespuesta = null;
+  }
+  main.addEventListener("wheel", alRueda, { passive: true });
+  main.addEventListener("touchmove", parar, { passive: true });
+  window.addEventListener("keydown", alTecla);
+  window.pararSeguirRespuesta = parar;
+})();
+</script>
+"""
+# Al hacer clic en un botón de elección o enviar una consulta, el contenido
+# guarda su altura hasta que SEGUIR_RESPUESTA termina. Sin esto, la tarjeta de
+# los botones se va con la consulta nueva, la página se acorta y, si el médico
+# estaba al fondo (donde están los botones), la vista saltaba hacia arriba
+# (medido en Edge, 26/10: ~170 px). Si no llega una respuesta (p. ej. "No se
+# sabe"), la suelta a los 6 s. Se instala una vez, desde la barra lateral, que
+# no mueve nada de la conversación.
+GUARDAR_ALTO = """
+<div class="seguir-respuesta"></div>
+<script>
+(() => {
+  if (window.guardarAltoInstalado) return;
+  window.guardarAltoInstalado = true;
+  const bloque = () => document.querySelector('[data-testid="stMainBlockContainer"]');
+  window.soltarAlto = () => { const b = bloque(); if (b) b.style.minHeight = ""; };
+  const guardar = () => {
+    const b = bloque();
+    if (!b) return;
+    b.style.minHeight = getComputedStyle(b).height;      // sin el relleno: min-height es del contenido
+    setTimeout(() => { if (!window.pararSeguirRespuesta) window.soltarAlto(); }, 6000);
+  };
+  document.addEventListener("pointerdown", (e) => {
+    if (e.target.closest('.st-key-eleccion button[data-variant="pills"]')) guardar();
+  }, true);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && e.target.closest('[data-testid="stChatInput"]')) guardar();
+  }, true);
+})();
+</script>
+"""
+PLACEHOLDER = "Describa el paciente: mecanismo, región y hallazgos"
+st.markdown(CSS, unsafe_allow_html=True)
+
+
+@st.cache_resource(show_spinner=False)
+def preparar_modelos() -> bool:
+    """Carga todo antes de la primera pregunta: bge-m3, el índice, el reranker
+    si se usa, y el generador en Ollama con el prompt de sistema en su caché.
+
+    Sin esto, la primera pregunta de una demo tardaba 25-35 s más que las
+    demás. Corre una vez por proceso de Streamlit. Si falla, lanza: Streamlit
+    no cachea excepciones y vuelve a intentarlo (p. ej. tras abrir Ollama).
+    """
+    from rag.build_prompt import SISTEMA_PROSA, SISTEMA_PROSA_GUIAS, SISTEMA_PROSA_GUIAS_ATLS10
+    from rag.generate import _ollama
+    from rag.retrieve import buscar, buscar_guias
+    buscar("herida en mano", k=1, ruta=ruta_por_defecto())
+    sistema = SISTEMA_PROSA
+    if usar_guias():
+        buscar_guias("herida en mano")
+        sistema = SISTEMA_PROSA_GUIAS_ATLS10 if config.ATLS10 else SISTEMA_PROSA_GUIAS
+    # carga el modelo con la ventana NUM_CTX: si después cambiara, Ollama lo recargaría
+    _ollama([{"role": "system", "content": sistema},
+             {"role": "user", "content": "ok"}], max_tokens=1, timeout=180)
+    return True
+
+
+@st.cache_resource(show_spinner=False)
+def perfiles_libros() -> dict:
+    return cargar_perfiles()
+
+
+# Los manuales que se buscan, para los textos de la app. El ATLS 10 solo con
+# ATLS10=1, con su edición y su origen.
+MANUALES = ("el ATLS 11.ª ed. (en inglés), el ATLS 10.ª ed. (2018, edición anterior, en una "
+            "traducción no oficial al español) y el manual de manejo inicial del HUV"
+            if config.ATLS10 else "el ATLS 11.ª ed. (en inglés) y el manual de manejo inicial del HUV")
+
+
+def manuales_indexados() -> bool:
+    try:
+        return hay_guias()
+    except Exception:        # Qdrant abierto por otro proceso: lo dice la precarga
+        return False
+
+
+error_preparacion = None
+with st.spinner("Cargando modelos (solo la primera vez, ~30 s)…"):
+    try:
+        preparar_modelos()
+    except Exception as e:           # Ollama apagado, índice ausente: lo dice la barra lateral
+        error_preparacion = f"{type(e).__name__}: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Barra lateral
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    st.markdown(f"<div class='marca-lateral'><span>✚</span>{TITULO}</div>", unsafe_allow_html=True)
+    st.html(GUARDAR_ALTO, unsafe_allow_javascript=True)
+    st.markdown("### Configuración")
+
+    ok_ollama, msg_ollama = ollama_disponible()
+    (st.success if ok_ollama else st.error)(msg_ollama)
+    if error_preparacion:
+        st.warning(f"No se pudieron precargar los modelos: {error_preparacion}")
+
+    ruta = st.selectbox("Ruta de recuperación", RUTAS,
+                        index=RUTAS.index(ruta_por_defecto()) if ruta_por_defecto() in RUTAS else 2,
+                        help="rrf fusiona BM25 y densa por posición. rerank reordena "
+                             "los candidatos de rrf con un cross-encoder y descarta "
+                             "los que no juzga relevantes.")
+    k = st.slider("Casos recuperados", 3, 10, config.TOP_K)
+    umbral = st.slider("Umbral de abstención", 0.0, 0.9, config.UMBRAL_ABSTENCION, 0.05,
+                       help="Coseno mínimo del mejor caso para que el sistema responda. "
+                            "Más alto = más conservador.")
+    umbral_rerank = None
+    if ruta == "rerank":
+        umbral_rerank = st.slider("Relevancia mínima por caso", 0.0, 0.95, config.UMBRAL_RERANK, 0.05,
+                                  help="Probabilidad del reranker para que un caso llegue a la "
+                                       f"respuesta. Con menos de {config.MIN_CASOS} casos, "
+                                       "el sistema se abstiene.")
+
+    st.markdown("### Fuentes")
+    hay_manuales = manuales_indexados()
+    con_guias = st.toggle(
+        "Manuales de trauma (ATLS y HUV)", value=config.GUIAS and hay_manuales,
+        disabled=not hay_manuales,
+        help=f"Segunda fuente, con el mismo peso que los casos: lo que recomiendan {MANUALES}. "
+             "Apagado, la respuesta sale solo de los casos del registro.")
+    if not hay_manuales:
+        st.caption("Los manuales no están indexados: `python -m rag.index --fuente guias`.")
+
+    st.markdown("### Filtros (casos)")
+    mecanismo = st.selectbox("Mecanismo", ["(todos)"] + list(config.ETIQUETAS_MECANISMO),
+                             format_func=lambda v: config.ETIQUETAS_MECANISMO.get(v, v))
+    region = st.selectbox("Región anatómica", ["(todos)"] + list(config.ETIQUETAS_REGION),
+                          format_func=lambda v: config.ETIQUETAS_REGION.get(v, v))
+    desenlace = st.selectbox("Desenlace", ["(todos)"] + list(config.ETIQUETAS_DESENLACE),
+                             format_func=lambda v: config.ETIQUETAS_DESENLACE.get(v, v))
+    # El corpus ya no trae registros truncados (apto_rag): no hay filtro que ofrecer.
+    filtros = Filtros(
+        mecanismo=None if mecanismo == "(todos)" else mecanismo,
+        region=None if region == "(todos)" else region,
+        desenlace=None if desenlace == "(todos)" else desenlace,
+    )
+
+    st.divider()
+    manuales = (f" · <b>Manuales</b>: {MANUALES}, lo que recomiendan. Lo hecho en los casos y lo "
+                "que recomiendan los manuales puede no coincidir: el sistema muestra las dos "
+                "miradas y no elige"
+                + (", tampoco entre las dos ediciones del ATLS." if config.ATLS10 else ".")
+                if con_guias else "")
+    st.markdown(
+        f"<div class='aviso'><b>Alcance</b><br>"
+        f"<b>Casos</b>: atención de trauma del registro, {config.COBERTURA_TEMPORAL}, lo que se "
+        f"hizo en casos históricos{manuales}<br><br>"
+        f"Sugiere solo lo que esas fuentes respaldan, con la cita de cada afirmación. Los "
+        f"protocolos cambian con el tiempo. No reemplaza el juicio clínico.<br><br>"
+        f"Los datos personales están reemplazados por marcadores "
+        f"(<code>[FECHA]</code>, <code>[EDAD:30-39]</code>).</div>",
+        unsafe_allow_html=True,
+    )
+    if CON_FICHA:
+        st.markdown("### Paciente")
+        ficha_actual = st.session_state.get("ficha")
+        st.caption(ficha_actual.linea() if ficha_actual and ficha_actual.es_paciente() else
+                   "Sin paciente: la próxima consulta empieza uno nuevo.")
+        if st.button("Paciente nuevo", use_container_width=True,
+                     help="Borra la ficha: la próxima consulta no se suma al paciente anterior."):
+            st.session_state.ficha = None
+            st.rerun()
+    if st.button("Limpiar conversación", use_container_width=True):
+        st.session_state.mensajes = []
+        st.session_state.ficha = None
+        st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Estado
+# ---------------------------------------------------------------------------
+if "mensajes" not in st.session_state:
+    st.session_state.mensajes = []
+if "ficha" not in st.session_state:
+    st.session_state.ficha = None
+
+
+def portada(lugar) -> str | None:
+    """Antes de la primera consulta: el título y el cuadro de la consulta en el
+    centro, y una línea con las fuentes, en `lugar` (se vacía en cuanto llega la
+    consulta). Devuelve lo escrito."""
+    with lugar.container():
+        st.markdown(f"<div class='titulo'><span class='marca'>✚</span>{TITULO}</div>",
+                    unsafe_allow_html=True)
+        escrita = st.chat_input(PLACEHOLDER, key="consulta_portada")
+        fuentes = "Casos del registro y manuales ATLS y HUV" if con_guias else "Casos del registro"
+        st.markdown(f"<div class='al-pie'>{fuentes}, con la cita de cada afirmación · "
+                    f"no reemplaza el juicio clínico</div>", unsafe_allow_html=True)
+    return escrita
+
+
+def tarjeta_caso(caso, consulta: str = "") -> str:
+    m = caso.metadata
+    etiquetas = []
+    if m.get("mecanismo_lesion"):
+        etiquetas.append(f"<span class='etq'>{config.ETIQUETAS_MECANISMO.get(m['mecanismo_lesion'], m['mecanismo_lesion'])}</span>")
+    for r in (m.get("region_anatomica") or [])[:3]:
+        etiquetas.append(f"<span class='etq'>{config.ETIQUETAS_REGION.get(r, r)}</span>")
+    etiquetas.append(f"<span class='etq'>{desenlace_visible(caso)}</span>")
+    texto = resaltar_html(caso.text, consulta).replace("\n", "<br>")
+    return (f"<div class='caso-box'><span class='caso-id'>caso {caso.record_id}</span> "
+            f"· similitud {caso.score_norm:.2f}<br>{''.join(etiquetas)}<br><br>{texto}</div>")
+
+
+def etiquetas_guia(f) -> str:
+    """Las etiquetas de un pasaje además de su cabecera (que ya dice libro,
+    edición y origen): el idioma del ATLS
+    11 y, del ATLS 10, el capítulo que trata lo mismo en la 11.ª (tabla
+    `equivalente_11`; el título completo, al pasar el cursor)."""
+    if f.idioma == "en":
+        return "<span class='etq'>en inglés</span>"
+    if f.fuente != "ATLS10" or not f.capitulo_num:
+        return ""
+    equivalentes = equivalentes_atls11(f.capitulo_num, perfiles_libros())
+    if not equivalentes:
+        return ""
+    caps = " y ".join(str(n) for n, _ in equivalentes)
+    titulo = html.escape(" / ".join(t for _, t in equivalentes), quote=True)
+    return (f"<span class='etq' title='{titulo}'>en la 11.ª ed.: "
+            f"cap{'s' if len(equivalentes) > 1 else ''}. {caps}</span>")
+
+
+def tarjeta_guia(seccion: str, fragmentos, consulta: str = "", con_puntaje: bool = True) -> str:
+    """Un pasaje de un manual: libro, capítulo, sección y páginas impresas, y su
+    texto tal cual (el ATLS 11 en inglés, el ATLS 10 en la traducción del PDF).
+    Sin puntaje, los que cita el protocolo: no salen de una búsqueda."""
+    f = fragmentos[0]
+    puntaje = ""
+    if con_puntaje:
+        escala = "relevancia" if f.relevancia is not None else "similitud"
+        puntaje = f" · {escala} {max(x.puntaje for x in fragmentos):.2f}"
+    texto = resaltar_html(texto_guia(fragmentos), consulta).replace("\n", "<br>")
+    return (f"<div class='caso-box guia-box'><span class='caso-id'>guía {ids_en_pantalla(seccion)}</span>"
+            f"{puntaje}<br><span class='etq'>{html.escape(cabecera_guia(fragmentos))}"
+            f"</span>{etiquetas_guia(f)}<br><br>{texto}</div>")
+
+
+def nota_verificacion(respuesta) -> None:
+    """Qué parte de la respuesta armó el código porque la redacción del modelo
+    no pasó la verificación (o no la hubo). Va arriba de la respuesta: como
+    caption gris al pie nadie la veía."""
+    if respuesta is not None and respuesta.orden_atls:
+        # por letras: las que no pasaron van armadas desde su fuente
+        if respuesta.letras_armadas:
+            st.markdown(f"<div class='nota'>Va armado desde las fuentes, sin redactar: "
+                        f"{html.escape(unir(respuesta.letras_armadas))} (la redacción del modelo no pasó "
+                        f"la verificación).</div>", unsafe_allow_html=True)
+        return
+    if respuesta is None or respuesta.prosa_verificada is not False or config.PROSA_SIEMPRE:
+        return
+    nombres = {"casos": "los casos", "guias": "los manuales"}
+    presentes = [n for n, hay in (("casos", respuesta.casos), ("guias", respuesta.guias)) if hay]
+    armadas = [nombres[n] for n in presentes if n not in respuesta.fuentes_en_prosa]
+    if not armadas:
+        return
+    motivo = respuesta.motivos[0] if respuesta.motivos else "sin detalle"
+    extra = f" y {len(respuesta.motivos) - 1} más" if len(respuesta.motivos) > 1 else ""
+    if motivo.startswith("no hay prosa"):
+        porque = "el modelo no redactó una sugerencia con respaldo"
+    else:
+        porque = f"la redacción del modelo no pasó la verificación: {motivo}{extra}"
+    st.markdown(f"<div class='nota'>Lo de {' y '.join(armadas)} va armado desde las fuentes, sin "
+                f"redactar ({html.escape(porque)}).</div>", unsafe_allow_html=True)
+
+
+def pie_tiempo(segundos: float | None) -> None:
+    """Tiempo hasta la respuesta, discreto, para medir modelos desde la interfaz."""
+    if segundos is None:
+        return
+    st.markdown(f"<div class='tiempo'>{segundos:.1f} s · {config.MODELO_LLM}</div>",
+                unsafe_allow_html=True)
+
+
+def desplegable_casos(respuesta, consulta: str) -> None:
+    """El texto completo de cada caso: la base de cada afirmación sobre los
+    casos, que el médico tiene que poder revisar por su cuenta."""
+    if not respuesta.casos:
+        return
+    buscada = respuesta.consulta_reescrita or consulta
+    etiqueta = f"Casos consultados ({len(respuesta.casos)}) · texto completo"
+    if respuesta.consulta_reescrita:
+        etiqueta += ("  ·  búsqueda con la ficha del paciente" if respuesta.ficha is not None
+                     else "  ·  consulta reescrita")
+    with st.expander(etiqueta):
+        if respuesta.consulta_reescrita:
+            st.caption(f"Búsqueda realizada: «{respuesta.consulta_reescrita}»")
+        relevancia = (f" · relevancia del reranker: {respuesta.relevancia:.2f}"
+                      if respuesta.relevancia is not None else "")
+        st.caption(f"Confianza (coseno del mejor caso): {respuesta.confianza:.3f}{relevancia} · "
+                   f"resaltado: lo que coincide con la consulta")
+        for c in respuesta.casos:
+            st.markdown(tarjeta_caso(c, buscada), unsafe_allow_html=True)
+
+
+def desplegable_tarjeta(respuesta, consulta: str) -> None:
+    """Bajo el protocolo: los pasajes que cita y,
+    aparte, los que encontró la búsqueda y el protocolo no cita."""
+    grupos = agrupar_guias(respuesta.pasajes_tarjeta)
+    if grupos:
+        with st.expander(f"Pasajes que cita el protocolo ({len(grupos)}) · texto completo"):
+            st.caption("El protocolo se escribió de antemano desde estos pasajes, y cada viñeta se "
+                       "verificó contra el suyo. Páginas impresas del libro"
+                       + ("; el ATLS 10, tal como viene en la traducción no oficial, sin corregir."
+                          if config.ATLS10 else "."))
+            for seccion, fragmentos in grupos.items():
+                st.markdown(tarjeta_guia(seccion, fragmentos, con_puntaje=False), unsafe_allow_html=True)
+    otros = [f for f in respuesta.guias if f.seccion_id not in grupos]
+    desplegable_guias(respuesta, consulta, otros, "Otros fragmentos que encontró la búsqueda")
+
+
+def desplegable_guias(respuesta, consulta: str, fragmentos=None,
+                      titulo: str = "Fragmentos de los manuales") -> None:
+    """El texto completo de cada pasaje de los manuales (los de la búsqueda, o
+    `fragmentos`)."""
+    fragmentos = respuesta.guias if fragmentos is None else fragmentos
+    if not fragmentos:
+        return
+    buscada = respuesta.consulta_reescrita or consulta
+    # la de los manuales, con abreviaturas y mecanismo (retrieve.candidatos_guias)
+    en_libros = para_libros(buscada)
+    grupos = agrupar_guias(fragmentos)
+    with st.expander(f"{titulo} ({len(grupos)}) · texto completo"):
+        if respuesta.guias_heredadas:
+            st.caption("Los de la respuesta anterior: con los datos nuevos, la búsqueda en los "
+                       "manuales no encontró pasajes que pasen la guarda.")
+        else:
+            if en_libros != buscada:
+                st.caption(f"Búsqueda en los manuales: «{en_libros}»")
+            # el ATLS 11 se busca en inglés (TRADUCIR_ATLS11, retrieve.candidatos_guias)
+            ingles = next((f.busqueda for f in fragmentos if f.fuente == "ATLS" and f.busqueda
+                           and f.busqueda != en_libros), None)
+            if ingles:
+                st.caption(f"Búsqueda en el ATLS 11, traducida: «{ingles}»")
+        st.caption("Pasajes que pasaron la guarda de los manuales, del más al menos relevante. "
+                   "Páginas impresas del libro; el ATLS 11, en su idioma original"
+                   + ("; el ATLS 10, tal como viene en la traducción no oficial, sin corregir."
+                      if config.ATLS10 else "."))
+        for seccion, fragmentos in grupos.items():
+            st.markdown(tarjeta_guia(seccion, fragmentos, fragmentos[0].busqueda or en_libros),
+                        unsafe_allow_html=True)
+
+
+# Pedido del usuario para la demo (19/10): en pantalla no van la línea de
+# respaldo ("Respaldo: 5 casos del registro · similitud…") ni el aviso de que
+# casos y manuales pueden no coincidir (apartado "pie"); tampoco, desde el
+# 26/10, el aviso de que el ATLS 10 es la edición anterior en traducción no
+# oficial (AVISO_ATLS10). Siguen en Respuesta.texto, para el historial y los
+# scripts. El aviso de similitud baja sí se muestra. Las citas van en rojo, con
+# el color de texto de Streamlit.
+APARTADOS_OCULTOS = {"pie"}
+RX_CITA_PANTALLA = re.compile(r"\[(caso|guía): ([^\]\n]+)\]")
+
+
+def citas_en_rojo(texto: str) -> str:
+    """[caso: ID] y [guía: ID] en rojo (`:red[…]` de Streamlit, corchetes escapados),
+    con el ATLS 11 como ATLS11-… (build_prompt.ids_en_pantalla)."""
+    return RX_CITA_PANTALLA.sub(lambda m: f":red[\\[{m.group(1)}: {ids_en_pantalla(m.group(2))}\\]]", texto)
+
+
+def cuerpo_respuesta(respuesta, consulta: str, de_a_poco: bool = False) -> None:
+    """La respuesta por apartados: casos (prosa y su desplegable) y manuales
+    (prosa o aviso de los pasajes, y su desplegable), o primero el protocolo de
+    la tarjeta (sus pasajes y los de la búsqueda, en dos desplegables). En un
+    seguimiento, el resto del protocolo va plegado ("tarjeta_resto"). Sin apartados
+    (abstención, resumen de un caso), el texto y los desplegables al final."""
+    def en_pantalla(texto: str) -> str:
+        return RX_LINEA_RESPALDO.sub("", texto).replace(AVISO_ATLS10, "").strip()
+
+    def escribir(texto: str) -> None:
+        texto = en_pantalla(texto)
+        if not de_a_poco:
+            st.markdown(citas_en_rojo(texto))
+            return
+        # Como st.write_stream, pero el color se pone sobre lo acumulado: una
+        # cita a medio escribir sale sin color hasta que se cierra.
+        lugar, acumulado = st.empty(), ""
+        for trozo in escribir_de_a_poco(texto, segundos_max=1.0):
+            acumulado += trozo
+            lugar.markdown(citas_en_rojo(acumulado))
+
+    if not respuesta.secciones:
+        escribir(respuesta.texto)
+        desplegable_casos(respuesta, consulta)
+        desplegable_guias(respuesta, consulta)
+        return
+    textos = {s.fuente: s.texto for s in respuesta.secciones}
+    # los pasajes de la tarjeta, debajo del protocolo: del plegado si lo hay
+    ultima_tarjeta = "tarjeta_resto" if "tarjeta_resto" in textos else "tarjeta"
+    for seccion in respuesta.secciones:
+        if seccion.fuente in APARTADOS_OCULTOS:
+            continue
+        if seccion.fuente == "tarjeta_resto":
+            with st.expander("Resto del protocolo" if ROTULO_PRIORIDAD in textos.get("tarjeta", "")
+                             else "Protocolo completo"):
+                st.markdown(citas_en_rojo(en_pantalla(seccion.texto)))
+        else:
+            escribir(seccion.texto)
+        if seccion.fuente == "casos":
+            desplegable_casos(respuesta, consulta)
+        elif seccion.fuente == "guias":
+            desplegable_guias(respuesta, consulta)
+        elif seccion.fuente == ultima_tarjeta:
+            desplegable_tarjeta(respuesta, consulta)
+
+
+def escribir_de_a_poco(texto: str, segundos_max: float = 2.0):
+    """El texto ya está completo: se muestra letra por letra solo por estética.
+    Los trozos crecen con el largo para que nunca tarde más de `segundos_max`."""
+    paso = max(1, len(texto) // int(segundos_max / 0.008))
+    for i in range(0, len(texto), paso):
+        yield texto[i:i + paso]
+        time.sleep(0.008)
+
+
+def encabezado_paciente(respuesta) -> None:
+    """Arriba de la respuesta, lo que entendió el código (CONVERSACION=ficha):
+    la ficha, si cambió de paciente y qué cambió respecto de la anterior."""
+    if respuesta.ficha is None or respuesta.tipo == "caso":
+        return
+    lineas = []
+    if respuesta.otro_paciente:
+        lineas.append("<b>Paciente nuevo</b>: no se suma al anterior.")
+    if respuesta.ficha.es_paciente():
+        lineas.append(html.escape(respuesta.ficha.linea()))
+    if respuesta.cambio:
+        lineas.append(html.escape(respuesta.cambio))
+    if lineas:
+        st.markdown(f"<div class='nota ficha'>{'<br>'.join(lineas)}</div>", unsafe_allow_html=True)
+
+
+def pintar(rol: str, contenido: str, respuesta=None, segundos: float | None = None,
+           consulta: str = "") -> None:
+    with st.chat_message(rol):
+        if respuesta is None or respuesta.error:
+            st.markdown(contenido)
+        else:
+            encabezado_paciente(respuesta)
+            nota_verificacion(respuesta)
+            cuerpo_respuesta(respuesta, consulta)
+        if respuesta is not None:
+            pie_tiempo(segundos)
+
+
+def corregir(indice: int, tipo: str) -> None:
+    """El código se equivocó de paciente: se quita el turno y se repite con el
+    tipo corregido. Solo si sigue siendo el último (un botón viejo no hace nada)."""
+    mensajes = st.session_state.mensajes
+    if indice != len(mensajes) - 1:
+        return
+    turno = mensajes.pop()
+    mensajes.pop()                                 # la pregunta
+    st.session_state.ficha = turno.get("ficha_previa")
+    st.session_state.repetir = (turno["consulta"], tipo)
+
+
+def correccion_pendiente() -> str | None:
+    """Bajo la última respuesta, el tipo con que se repetiría: "nuevo" ("Es otro
+    paciente") si se sumó a la ficha, "seguimiento" ("Era el mismo paciente") si
+    empezó una nueva; None si no va el botón."""
+    if not CON_FICHA or not st.session_state.mensajes:
+        return None
+    ultimo = st.session_state.mensajes[-1]
+    r = ultimo.get("respuesta")
+    if ultimo["role"] != "assistant" or r is None or r.tipo not in ("nuevo", "seguimiento"):
+        return None
+    if r.tipo == "nuevo" and not r.otro_paciente:
+        return None
+    return "seguimiento" if r.tipo == "nuevo" else "nuevo"
+
+
+def contestar(indice: int, clave: str, llave: str) -> None:
+    """Un clic en una opción: con dato, se suma como seguimiento y se responde
+    de nuevo; "No se sabe" solo deja de preguntarlo (preguntas.descartar)."""
+    mensajes = st.session_state.mensajes
+    if indice != len(mensajes) - 1:
+        return
+    pregunta = next(p for p in mensajes[-1]["respuesta"].preguntas if p.clave == clave)
+    opcion = next((o for o in pregunta.opciones if o.etiqueta == st.session_state.get(llave)), None)
+    if opcion is None:
+        return
+    if opcion.mensaje is None:
+        if st.session_state.ficha is not None:
+            st.session_state.ficha = descartar(st.session_state.ficha, clave)
+    else:
+        st.session_state.repetir = (opcion.mensaje, "seguimiento")
+
+
+def preguntas_pendientes() -> list:
+    """Bajo la última respuesta, lo que falta (PREGUNTAS=1; rag/preguntas.py)."""
+    if not (CON_FICHA and config.PREGUNTAS) or not st.session_state.mensajes:
+        return []
+    ultimo = st.session_state.mensajes[-1]
+    r = ultimo.get("respuesta")
+    if ultimo["role"] != "assistant" or r is None:
+        return []
+    sin_dato = set(st.session_state.ficha.sin_dato) if st.session_state.ficha else set()
+    return [p for p in r.preguntas if p.clave not in sin_dato]
+
+
+def etiqueta_pregunta(texto: str) -> str:
+    """"B · Respiración — ¿cómo ventila?" → "**B · Respiración** ¿Cómo ventila?":
+    el tema va en negrita, y el CSS de .st-key-eleccion lo pone como una línea
+    pequeña encima de la pregunta."""
+    tema, _, pregunta = texto.partition(" — ")
+    if not pregunta:
+        return texto
+    if pregunta.startswith("¿"):
+        pregunta = "¿" + pregunta[1:2].upper() + pregunta[2:]
+    return f"**{tema}** {pregunta}"
+
+
+def eleccion() -> None:
+    """Bajo la última respuesta, en una tarjeta: las preguntas con botones y el
+    botón para corregir al código si tomó mal al paciente (26/10, pedido del
+    usuario: más cuidados para la demo, sin perder formalidad; el estilo va en
+    el CSS, .st-key-eleccion). "No se sabe" va en cursiva para que el CSS lo
+    distinga; el valor de la opción no cambia (format_func)."""
+    preguntas, otro = preguntas_pendientes(), correccion_pendiente()
+    if not preguntas and otro is None:
+        return
+    indice = len(st.session_state.mensajes) - 1
+    with st.container(key="eleccion"):
+        if preguntas:
+            st.markdown("<div class='eleccion-titulo'>Para afinar la respuesta</div>", unsafe_allow_html=True)
+        for p in preguntas:
+            llave = f"pregunta-{indice}-{p.clave}"
+            st.pills(etiqueta_pregunta(p.texto), [o.etiqueta for o in p.opciones], key=llave,
+                     format_func=lambda e: f"*{e}*" if e == NO_SE_SABE.etiqueta else e,
+                     on_change=contestar, args=(indice, p.clave, llave))
+        if otro is not None:
+            r = st.session_state.mensajes[-1]["respuesta"]
+            st.button("Era el mismo paciente" if otro == "seguimiento" else "Es otro paciente",
+                      icon=":material/undo:" if otro == "seguimiento" else ":material/person_add:",
+                      type="tertiary", on_click=corregir, args=(indice, otro), key=f"corregir-{indice}",
+                      help="El código lo tomó como " + ("un paciente nuevo." if r.tipo == "nuevo" else
+                                                         "el mismo paciente.") + " Responde de nuevo.")
+
+
+# El lugar de la portada va siempre primero, vacío en la conversación: así,
+# cuando la portada se va, lo que sigue no cambia de posición al volver a
+# pintarse la página (ver SEGUIR_RESPUESTA).
+lugar_portada = st.empty()
+for m in st.session_state.mensajes:
+    pintar(m["role"], m["content"], m.get("respuesta"), m.get("segundos"), m.get("consulta", ""))
+
+
+# ---------------------------------------------------------------------------
+# Turno
+# ---------------------------------------------------------------------------
+# Sin conversación, la portada (el cuadro en el centro); con ella, el cuadro abajo.
+# En `st.bottom` y no con st.chat_input en la raíz: así Streamlit lo fija abajo
+# igual, pero no envuelve la página en su contenedor que se pega al final
+# (stAppScrollToBottomContainer), que bajaba solo hasta los botones de las
+# preguntas al terminar cada respuesta. Lo que sí baja, la respuesta mientras
+# se genera, lo hace SEGUIR_RESPUESTA (26/10, pedido del usuario).
+if st.session_state.mensajes or "repetir" in st.session_state:
+    escrita = st.bottom.chat_input(PLACEHOLDER, key="consulta")
+else:
+    escrita = portada(lugar_portada)
+    if escrita:
+        # el cuadro de abajo aparece ya con la primera consulta, no al terminar:
+        # si no, al aparecer tapaba ~130 px del final de la respuesta
+        st.bottom.chat_input(PLACEHOLDER, key="consulta")
+# el botón de corregir y las preguntas repiten o suman una consulta
+pregunta, forzar = (escrita, None) if escrita else st.session_state.pop("repetir", (None, None))
+
+# Los botones de la última respuesta, solo si no llega una consulta nueva. Si
+# llega, quedaban arriba de ella mientras se generaba y, al pintarse debajo de la
+# respuesta nueva, lo de arriba se encogía y la página saltaba hasta ellos
+# (medido en Edge, 26/10: ~300 px).
+if not pregunta:
+    eleccion()
+
+if pregunta:
+    lugar_portada.empty()
+    st.session_state.mensajes.append({"role": "user", "content": pregunta})
+    with st.chat_message("user"):
+        st.markdown(pregunta)
+        # dentro de la burbuja y al final: al volver a pintarse la página, quitarlo
+        # no corre de lugar la respuesta (ver SEGUIR_RESPUESTA)
+        st.html(SEGUIR_RESPUESTA.replace("{turno}", str(len(st.session_state.mensajes))),
+                unsafe_allow_javascript=True)
+
+    historial = [{"role": m["role"], "content": m["content"]}
+                 for m in st.session_state.mensajes[:-1]]
+    # la respuesta anterior a la que se compara un seguimiento (no un resumen de caso)
+    anterior = next((m["respuesta"] for m in reversed(st.session_state.mensajes)
+                     if m.get("respuesta") is not None and m["respuesta"].tipo in ("nuevo", "seguimiento")),
+                    None)
+    ficha_previa = st.session_state.ficha
+
+    with st.chat_message("assistant"):
+        t0 = time.perf_counter()
+        with st.spinner("Pensando…"):
+            m = RX_CASO.match(pregunta)
+            if m and not forzar:
+                r = resumir_caso(m.group(1))
+            else:
+                r = responder(pregunta, historial=historial, ruta=ruta, k=k,
+                              filtros=filtros, umbral=umbral, umbral_rerank=umbral_rerank,
+                              guias=con_guias, ficha=ficha_previa, anterior=anterior, tipo=forzar)
+        segundos = time.perf_counter() - t0
+        if r.ficha is not None:
+            st.session_state.ficha = r.ficha
+
+        if r.error:
+            st.error(r.error)
+            texto = f"_{r.error}_"
+        else:
+            texto = r.texto
+            encabezado_paciente(r)
+            nota_verificacion(r)
+            cuerpo_respuesta(r, pregunta, de_a_poco=True)
+        pie_tiempo(segundos)
+
+    st.session_state.mensajes.append(
+        {"role": "assistant", "content": texto, "respuesta": r, "segundos": segundos,
+         "consulta": pregunta, "ficha_previa": ficha_previa}
+    )
+    # el cuadro de la consulta abajo (tras la portada), el botón de corregir, las
+    # preguntas y la ficha de la barra lateral, al día
+    st.rerun()
