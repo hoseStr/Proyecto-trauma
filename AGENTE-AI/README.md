@@ -163,24 +163,3 @@ primera vez). Después, una respuesta tarda entre 5 y 10 s.
 
 La configuración se cambia con variables de entorno; todas están
 documentadas en `rag_pipeline/rag/config.py`.
-
-## 6. Problemas conocidos
-
-- **Qdrant local admite un solo proceso.** Con la app abierta fallan
-  `rag.index` y `preparar_demo.py` (`already accessed by another instance`).
-  Cerrar Streamlit, o apuntar `INDICE_DIR` a una copia de `indices\` sin el
-  archivo `.lock`.
-- **Lanzar Streamlit desde `rag_pipeline\`.** Solo así lee
-  `.streamlit/config.toml`, que evita que recargue `rag/` y abra un segundo
-  cliente de Qdrant. Al editar `rag/*.py`, reiniciar Streamlit.
-- **HTTP 500 del chatbot**: casi siempre falta de memoria en Ollama.
-  Probar `$env:NUM_GPU = "-1"`. Log en `%LOCALAPPDATA%\Ollama\server.log`.
-- **La app se queda en "Cargando modelos…" y termina en `TimeoutError`**: la
-  caché de prompts de Ollama llenó la RAM. Se evita con
-  `setx LLAMA_ARG_CACHE_RAM 0` y reiniciando Ollama.
-- **Ollama se usa por `127.0.0.1`, no `localhost`**: en Windows, `localhost`
-  prueba primero IPv6 y cada llamada pierde 2 s.
-- **Las tarjetas citan secciones por su identificador.** Si se vuelven a
-  extraer los manuales con otra versión de `pymupdf` y cambia un identificador,
-  `tests/test_tarjetas.py` lo avisa. La versión está fijada en
-  `rag_pipeline/requirements.txt`.
